@@ -1,0 +1,17 @@
+{
+  "name": "discord-rsvp-worker",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "publish": "wrangler publish",
+    "register": "node src/register.js"
+  },
+  "dependencies": {
+    "discord-interactions": "^4.0.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "wrangler": "^3.70.0"
+  }
+}
