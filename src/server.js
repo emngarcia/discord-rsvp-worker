@@ -1,60 +1,79 @@
+// src/server.js
 import {
   verifyKey,
   InteractionType,
   InteractionResponseType,
-  InteractionResponseFlags
+  InteractionResponseFlags,
 } from "discord-interactions";
 
+// Custom IDs for our buttons
 const YES = "YES_BTN";
 const NO = "NO_BTN";
 const MAYBE = "MAYBE_BTN";
 
+/** Utility: JSON response */
 function json(obj) {
   return new Response(JSON.stringify(obj), {
-    headers: { "Content-Type": "application/json" }
+    headers: { "Content-Type": "application/json" },
   });
 }
 
+/** Utility: ephemeral reply payload */
 function ephemeral(content) {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: { content, flags: InteractionResponseFlags.EPHEMERAL }
+    data: { content, flags: InteractionResponseFlags.EPHEMERAL },
   };
 }
 
+/** Render the message content with a counts line on the second line */
 function formatContentWithCounts(originalContent, totals) {
-  const title = (originalContent?.split("\n")[0] ?? "").trim() || "Event";
+  const title =
+    (originalContent?.split("\n")[0] ?? "").trim() || "Event";
   const counts = `Yes: ${totals.yes} | No: ${totals.no} | Maybe: ${totals.maybe}`;
   return `${title}\n${counts}`;
 }
 
 export default {
   async fetch(request, env) {
+    // Health check
+    if (request.method === "GET") {
+      return new Response("OK");
+    }
+
     if (request.method === "POST") {
+      // --- REQUIRED: Verify Discord signature with RAW BYTES ---
       const signature = request.headers.get("x-signature-ed25519");
       const timestamp = request.headers.get("x-signature-timestamp");
-      const raw = await request.text();
+      const bodyBytes = new Uint8Array(await request.arrayBuffer()); // raw bytes
 
-      const ok = verifyKey(
-        new TextEncoder().encode(raw),
+      const valid = verifyKey(
+        bodyBytes,
         signature,
         timestamp,
         env.DISCORD_PUBLIC_KEY
       );
-      if (!ok) return new Response("Bad request signature.", { status: 401 });
+      if (!valid) {
+        return new Response("Bad request signature.", { status: 401 });
+      }
 
-      const msg = JSON.parse(raw);
+      // Safe to parse after verification
+      const msg = JSON.parse(new TextDecoder().decode(bodyBytes));
 
-      // 1) Ping
+      // 1) Handshake (Discord will send this when you set Interactions URL)
       if (msg.type === InteractionType.PING) {
         return json({ type: InteractionResponseType.PONG });
       }
 
       // 2) Slash command: /event title: ...
       if (msg.type === InteractionType.APPLICATION_COMMAND) {
-        const name = msg.data.name.toLowerCase();
+        const name = msg.data?.name?.toLowerCase();
         if (name === "event") {
-          const eventTitle = msg.data.options.find(o=>o.name==="title")?.value ?? "Event";
+          const eventTitle =
+            msg.data.options?.find((o) => o.name === "title")?.value ??
+            "Event";
+
+          // Respond with message + 3 buttons
           return json({
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
@@ -63,81 +82,122 @@ export default {
                 {
                   type: 1, // action row
                   components: [
-                    { type: 2, style: 3, label: "Yes",   custom_id: YES,   emoji: { name: "✅" } },
-                    { type: 2, style: 4, label: "No",    custom_id: NO,    emoji: { name: "❌" } },
-                    { type: 2, style: 2, label: "Maybe", custom_id: MAYBE, emoji: { name: "❓" } }
-                  ]
-                }
-              ]
-            }
+                    {
+                      type: 2,
+                      style: 3,
+                      label: "Yes",
+                      custom_id: YES,
+                      emoji: { name: "✅" },
+                    },
+                    {
+                      type: 2,
+                      style: 4,
+                      label: "No",
+                      custom_id: NO,
+                      emoji: { name: "❌" },
+                    },
+                    {
+                      type: 2,
+                      style: 2,
+                      label: "Maybe",
+                      custom_id: MAYBE,
+                      emoji: { name: "❓" },
+                    },
+                  ],
+                },
+              ],
+            },
           });
         }
+
         return json(ephemeral("Unknown command."));
       }
 
-      // 3) Button presses
+      // 3) Button presses (message components)
       if (msg.type === InteractionType.MESSAGE_COMPONENT) {
+        // User info (nick/global/username)
         const user = msg.member?.user ?? msg.user;
-        const username   = user?.username ?? "unknown";
+        const username = user?.username ?? "unknown";
         const globalName = user?.global_name ?? null;
         const serverNick = msg.member?.nick ?? null;
-        const display    = serverNick || globalName || username;
+        const display = serverNick || globalName || username;
 
-        const userId     = user?.id ?? "unknown";
-        const channelId  = msg.channel_id ?? "";
-        const messageId  = msg.message?.id ?? "";
-        const original   = msg.message?.content ?? "";
-        const eventTitle = (original.split("\n")[0] || "").replace(/\*\*/g,"").trim()
-                           || `Event ${messageId}`;
+        // Context
+        const userId = user?.id ?? "unknown";
+        const channelId = msg.channel_id ?? "";
+        const messageId = msg.message?.id ?? "";
+        const original = msg.message?.content ?? "";
+        const eventTitle =
+          (original.split("\n")[0] || "").replace(/\*\*/g, "").trim() ||
+          `Event ${messageId}`;
 
+        // Which button?
         let rsvp = null;
-        if (msg.data.custom_id === YES) rsvp = "Yes";
-        else if (msg.data.custom_id === NO) rsvp = "No";
-        else if (msg.data.custom_id === MAYBE) rsvp = "Maybe";
+        if (msg.data?.custom_id === YES) rsvp = "Yes";
+        else if (msg.data?.custom_id === NO) rsvp = "No";
+        else if (msg.data?.custom_id === MAYBE) rsvp = "Maybe";
         if (!rsvp) return json(ephemeral("Unknown action."));
 
-        // write to Sheets (and get totals back)
+        // 3a) Upsert to Google Sheet via Apps Script; get totals back
         const payload = {
-          eventTitle, userId, username, globalName, serverNick, display,
-          rsvp, timestamp: new Date().toISOString(), messageId, channelId
+          eventTitle,
+          userId,
+          username,
+          globalName,
+          serverNick,
+          display,
+          rsvp,
+          timestamp: new Date().toISOString(),
+          messageId,
+          channelId,
         };
 
-        const res = await fetch(env.SHEETS_ENDPOINT, {
+        const writeRes = await fetch(env.SHEETS_ENDPOINT, {
           method: "POST",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify(payload)
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         });
 
-        if (!res.ok) return json(ephemeral("Failed to record RSVP. Try again."));
-        const { ok:okWrite, totals } = await res.json();
-        if (!okWrite) return json(ephemeral("Failed to record RSVP."));
+        if (!writeRes.ok) {
+          return json(ephemeral("Failed to record RSVP. Try again."));
+        }
+        const { ok: okWrite, totals } = await writeRes.json();
+        if (!okWrite) {
+          return json(ephemeral("Failed to record RSVP."));
+        }
 
-        // edit the original message in-place using the interaction token (no bot token needed)
-        const newContent = formatContentWithCounts(original, totals || {yes:0,no:0,maybe:0});
+        // 3b) Edit the ORIGINAL message with new counts using interaction token
+        const newContent = formatContentWithCounts(
+          original,
+          totals || { yes: 0, no: 0, maybe: 0 }
+        );
         const appId = env.DISCORD_APPLICATION_ID;
-        const token = msg.token;
+        const token = msg.token; // interaction token
 
-        const edit = await fetch(
+        const editRes = await fetch(
           `https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`,
           {
             method: "PATCH",
-            headers: { "Content-Type":"application/json" },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               content: newContent,
-              components: msg.message.components // keep buttons
-            })
+              components: msg.message.components, // keep buttons
+            }),
           }
         );
-        if (!edit.ok) {
-          console.error("Edit failed:", await edit.text());
+        if (!editRes.ok) {
+          console.error("Edit failed:", await editRes.text());
+          // Even if edit fails, acknowledge the click so the user isn't stuck
         }
+
+        // Ephemeral ack to the clicker
         return json(ephemeral(`Recorded: **${rsvp}**`));
       }
 
-      return new Response("Unhandled type", { status: 400 });
+      // Fallback
+      return new Response("Unhandled interaction type", { status: 400 });
     }
 
-    // health
-    return new Response("OK");
-  }
+    return new Response("Method not allowed", { status: 405 });
+  },
 };
