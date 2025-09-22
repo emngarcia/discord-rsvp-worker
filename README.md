@@ -13,3 +13,10 @@ Button clicks write to Google Sheets and the message shows live counts.
 3) Connect this repo in Cloudflare Workers → “Deploy from GitHub”.
 4) In Discord Developer Portal → Interactions Endpoint URL = Worker URL.
 5) Register `/event` (run locally):
+
+## Google Sheets Apps Script
+
+See [google-sheets-script/Code.gs](google-sheets-script/Code.gs) for the Apps Script
+deployed as a Web App on the Google Sheet. Deploy this in the Sheet’s
+**Extensions → Apps Script**, then copy the Web App URL and put it into the
+Cloudflare Worker secret `SHEETS_ENDPOINT`.
