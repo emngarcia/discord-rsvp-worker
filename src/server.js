@@ -37,28 +37,45 @@ function formatContentWithCounts(originalContent, totals) {
 export default {
   async fetch(request, env) {
     // Health check
-    if (request.method === "GET") {
-      return new Response("OK");
+    // Quick diagnostics endpoint (GET /diag)
+    // Returns booleans and lengths only — no secrets are exposed.
+    if (request.method === "GET" && new URL(request.url).pathname === "/diag") {
+    const pub = env.DISCORD_PUBLIC_KEY || "";
+    const app = env.DISCORD_APPLICATION_ID || "";
+    return new Response(JSON.stringify({
+        hasPublicKey: !!pub,
+        publicKeyLen: pub.length,       // should be ~64 for hex
+        hasAppId: !!app,
+        appIdLen: app.length
+    }), { headers: { "Content-Type": "application/json" }});
     }
 
     if (request.method === "POST") {
-      // --- REQUIRED: Verify Discord signature with RAW BYTES ---
-      const signature = request.headers.get("x-signature-ed25519");
-      const timestamp = request.headers.get("x-signature-timestamp");
-      const bodyBytes = new Uint8Array(await request.arrayBuffer()); // raw bytes
+        // --- REQUIRED: Verify Discord signature with RAW BYTES ---
+        const signature = request.headers.get("x-signature-ed25519");
+        const timestamp = request.headers.get("x-signature-timestamp");
 
-      const valid = verifyKey(
-        bodyBytes,
+        // Read the exact raw bytes (no string conversion!)
+        const bodyBuffer = await request.arrayBuffer();
+
+        const isValid = verifyKey(
+        bodyBuffer,                 // pass ArrayBuffer directly
         signature,
         timestamp,
-        env.DISCORD_PUBLIC_KEY
-      );
-      if (!valid) {
-        return new Response("Bad request signature.", { status: 401 });
-      }
+        env.DISCORD_PUBLIC_KEY      // 64-char hex from Dev Portal → General Information
+        );
 
-      // Safe to parse after verification
-      const msg = JSON.parse(new TextDecoder().decode(bodyBytes));
+        if (!isValid) {
+        console.error("verifyKey failed", {
+            hasSig: !!signature,
+            hasTs: !!timestamp,
+            // do NOT log the body or key
+        });
+        return new Response("Bad request signature.", { status: 401 });
+        }
+
+        // Only now parse JSON
+        const msg = JSON.parse(new TextDecoder().decode(bodyBuffer));
 
       // 1) Handshake (Discord will send this when you set Interactions URL)
       if (msg.type === InteractionType.PING) {
